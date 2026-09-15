@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Aortic Growth Trajectory Predictor</title>
+    <style>
+        body { font-family: system-ui, -apple-system, sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; background: #f0f2f5; }
+        .card { background: white; padding: 2rem; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+        /* Updated to 3 columns to accommodate Gender */
+        .controls { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; margin-bottom: 20px; }
+        .slider-group { display: flex; flex-direction: column; }
+        label { font-weight: 600; margin-bottom: 8px; color: #333; }
+        input[type="range"], select { width: 100%; cursor: pointer; padding: 4px; border-radius: 4px; border: 1px solid #ccc; }
+        canvas { background: #fff; border: 1px solid #ddd; border-radius: 4px; width: 100%; height: 350px; }
+        .stats { margin-top: 15px; padding: 10px; background: #e7f3ff; border-radius: 6px; font-weight: bold; color: #0056b3; text-align: center; }
+    </style>
+</head>
+<body>
+
+<div class="card">
+    <h2 style="text-align: center;">Aortic Growth Trajectory</h2>
+    <div class="controls">
+        <div class="slider-group">
+            <label>Current Aorta Size: <span id="aoLabel">3.40</span> cm</label>
+            <input type="range" id="aoSlider" min="2.8" max="4.2" step="0.01" value="3.40">
+        </div>
+        <div class="slider-group">
+            <label>Current Age: <span id="ageLabel">60</span> yrs</label>
+            <input type="range" id="ageSlider" min="38" max="80" step="1" value="60">
+        </div>
+        <div class="slider-group">
+            <label>Gender (Sex)</label>
+            <select id="genderSelect">
+                <option value="1">Male</option>
+                <option value="0">Female</option>
+            </select>
+        </div>
+    </div>
+
+    <canvas id="trajChart"></canvas>
+    <div class="stats" id="resultNote"></div>
+
+    <div class="disclaimer">
+        Disclaimer: This interactive tool is provided solely as a supplemental resource to demonstrate the statistical findings of the associated research paper. It is intended for academic and illustrative purposes only; it has not undergone external clinical validation and is not intended for clinical use, diagnosis, or treatment decisions. The authors and affiliated institutions assume no liability for any outcomes resulting from the use of this model in a medical setting.
+    </div>
+</div>
+
+<script>
+    // Threshold value --> extrapolate up to 4.5 cm
+    const ceilingValue = 4.5;
+    
+    // Model Coefficients from R: lm(formula = g ~ logA0 * s + a)
+    const B = [-0.2790464, 0.5376854, -0.2495225, -0.0034795, 0.1935155];
+
+    // Variance-Covariance Matrix (VCOV) exactly from R: vcov(finalMod)
+    const VCOV = [
+        [ 1.731464e-02, -1.417437e-02, -1.727271e-02, -3.848876e-06,  1.432597e-02],
+        [-1.417437e-02,  1.313854e-02,  1.442969e-02, -2.343759e-05, -1.221537e-02],
+        [-1.727271e-02,  1.442969e-02,  3.023347e-02, -1.667219e-06, -2.465043e-02],
+        [-3.848876e-06, -2.343759e-05, -1.667219e-06,  5.063667e-07,  3.492692e-06],
+        [ 1.432597e-02, -1.221537e-02, -2.465043e-02,  3.492692e-06,  2.032680e-02]
+    ];
+
+    const aoSlider = document.getElementById('aoSlider'), ageSlider = document.getElementById('ageSlider'), genderSelect = document.getElementById('genderSelect');
+    const aoLabel = document.getElementById('aoLabel'), ageLabel = document.getElementById('ageLabel');
+    const canvas = document.getElementById('trajChart'), ctx = canvas.getContext('2d');
+
+    function predictWithSE(logA0, age, s) {
+        // Feature vector x: [1, logA0, s, age, logA0*s]
+        const x = [1, logA0, s, age, logA0 * s];
+        
+        // Calculate Fit: B %*% x
+        let fit = 0;
+        for(let i=0; i<5; i++) fit += B[i] * x[i];
+
+        // Calculate SE: sqrt(x' %*% VCOV %*% x)
+        let variance = 0;
+        for (let i = 0; i < 5; i++) {
+            for (let j = 0; j < 5; j++) {
+                variance += x[i] * VCOV[i][j] * x[j];
+            }
+        }
+        return { fit: fit, se: Math.sqrt(variance) };
+    }
+    
+    // Replicates: predict(finalMod, newdata = ..., interval = 'confidence')
+    function predictConfidence(logA0, age, s) {
+        const p = predictWithSE(logA0, age, s);
+        const crit = 1.96; // Standard for 95% CI in R
+        return {
+            fit: p.fit,
+            lwr: p.fit - (crit * p.se),
+            upr: p.fit + (crit * p.se)
+        };
+    }
+
+    function getTrajectory(initialAo, startAge, s) {
+        let age = parseInt(startAge);
+        let gender = parseInt(s);
+        let currentLogA0 = Math.log(initialAo);
+        let currentLb = Math.log(initialAo);
+        let currentUb = Math.log(initialAo);
+        
+        let trajectory = [{ age: age, ao: initialAo, lb: initialAo, ub: initialAo }];
+
+        for (let aNow = age; aNow < 85; aNow++) {
+            let conf = predictConfidence(currentLogA0, aNow, gender);
+            
+            currentLogA0 = Math.log(Math.exp(currentLogA0) + 0.1 * conf.fit);
+            currentLb = Math.log(Math.exp(currentLb) + 0.1 * conf.lwr);
+            currentUb = Math.log(Math.exp(currentUb) + 0.1 * conf.upr);
+            
+            trajectory.push({ 
+                age: aNow + 1, 
+                ao: Math.exp(currentLogA0), 
+                lb: Math.exp(currentLb), 
+                ub: Math.exp(currentUb) 
+            });
+        }
+        return trajectory;
+    }
+    
+    function trimTrajectory(traj0) {
+        let retTraj = []; 
+        for (let i = 0; i < traj0.length; ++i) {
+            if (traj0[i].ao <= ceilingValue) {
+                retTraj.push(traj0[i]);
+            }
+        }
+        return retTraj;
+    }
+    
+    function GetCross45(traj0) {
+        return(traj0[traj0.length - 1].age + 1)
+    }
+
+    function drawChart(data) {
+        const width = canvas.width = canvas.offsetWidth;
+        const height = canvas.height = canvas.offsetHeight;
+        const Xmargin = 90, YmarginTop = 70;
+        
+        ctx.clearRect(0, 0, width, height);
+
+        const minX = 38, maxX = 85;
+        const minY = 2.8, maxY = 5.0; // Updated maxY to 5.0 per previous request
+
+        const getX = (age) => Xmargin + (age - minX) / (maxX - minX) * (width - 2 * Xmargin);
+        const getY = (ao) => (height - YmarginTop) - (ao - minY) / (maxY - minY) * (height - 0.8 * YmarginTop);
+
+        ctx.font = "12px sans-serif";
+        ctx.fillStyle = "#555";
+        ctx.strokeStyle = "#eee";
+        ctx.lineWidth = 1;
+
+        [40, 50, 60, 70, 80].forEach(a => {
+            const x = getX(a);
+            ctx.beginPath();
+            ctx.moveTo(x, height - YmarginTop);
+            ctx.lineTo(x, height - YmarginTop + 8);
+            ctx.stroke();
+            ctx.textAlign = "center";
+            ctx.fillText(a, x, height - YmarginTop + 22);
+        });
+        ctx.textAlign = "center";
+        ctx.fillText("Age (years)", width / 2, height - 25);
+
+        [3.0, 3.5, 4.0, 4.5, 5.0].forEach(s => {
+            const y = getY(s);
+            ctx.beginPath(); ctx.moveTo(Xmargin, y); ctx.lineTo(width - Xmargin, y); ctx.stroke();
+            ctx.textAlign = "right"; ctx.fillText(s.toFixed(1), Xmargin - 15, y + 4);
+        });
+        
+        ctx.textAlign = "center";
+        ctx.fillText("Size (cm)", 35, height / 2);
+
+        // Confidence Interval Lines (Blue)
+        ctx.strokeStyle = 'rgba(0, 0, 255, 0.4)';
+        ctx.lineWidth = 1;
+        
+        ctx.beginPath();
+        data.forEach((pt, i) => i === 0 ? ctx.moveTo(getX(pt.age), getY(pt.ub)) : ctx.lineTo(getX(pt.age), getY(pt.ub)));
+        ctx.stroke();
+
+        ctx.beginPath();
+        data.forEach((pt, i) => i === 0 ? ctx.moveTo(getX(pt.age), getY(pt.lb)) : ctx.lineTo(getX(pt.age), getY(pt.lb)));
+        ctx.stroke();
+
+        // Main Trajectory (Red)
+        ctx.strokeStyle = 'red';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        data.forEach((pt, i) => i === 0 ? ctx.moveTo(getX(pt.age), getY(pt.ao)) : ctx.lineTo(getX(pt.age), getY(pt.ao)));
+        ctx.stroke();
+
+        // Start point indicator
+        ctx.fillStyle = '#e74c3c';
+        ctx.beginPath(); ctx.arc(getX(data[0].age), getY(data[0].ao), 4, 0, Math.PI * 2); ctx.fill();
+
+        const last = data[data.length - 1];
+        const statsText = `Size at age ${last.age}: ${last.ao.toFixed(1)} (${last.lb.toFixed(1)} – ${last.ub.toFixed(1)})`;
+
+        if (last.ao > 4.45) {
+            document.getElementById('resultNote').textContent = 
+                `Projected to reach 4.5 cm at ${GetCross45(data)} years. ${statsText}`;
+        } else {
+            document.getElementById('resultNote').textContent = 
+                `Projected growth does not reach 4.5 cm. ${statsText}`;
+        }
+    }
+
+    function update() {
+        const ao = parseFloat(aoSlider.value);
+        const age = parseInt(ageSlider.value);
+        const gender = parseInt(genderSelect.value);
+        
+        aoLabel.textContent = ao.toFixed(2);
+        ageLabel.textContent = age;
+        
+        drawChart(trimTrajectory(getTrajectory(ao, age, gender)));
+    }
+
+    aoSlider.addEventListener('input', update);
+    ageSlider.addEventListener('input', update);
+    genderSelect.addEventListener('change', update);
+    update();
+</script>
+
+<style>
+	#aoLabel, #ageLabel {
+		display: inline-block;
+		min-width: 10px; /* Adjust this value if you want it even wider */
+		text-align: right;
+		font-variant-numeric: tabular-nums; /* Keeps numbers from jumping */
+		margin-left: 5px;
+	}
+	.card { 
+		background: white; 
+		padding: 2rem; 
+		border-radius: 12px; 
+		box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+		/* Change this value to make it wider */
+		max-width: 1500px; 
+		margin: 0 auto; /* Keeps the card centered */
+	}
+	body { 
+		font-family: system-ui, -apple-system, sans-serif; 
+		max-width: 1000px; /* Increased from 800px */
+		margin: 2rem auto; 
+		padding: 0 1rem; 
+		line-height: 1.5; 
+		background: #f0f2f5; 
+	}
+	.slider-group {
+		display: flex;
+		flex-direction: column;
+		align-items: center; /* This centers the children horizontally */
+		text-align: center;  /* This centers the text inside the labels */
+	}
+	.disclaimer {
+		margin-top: 20px;
+		padding: 15px;
+		border: 1px solid #cbd5e0;
+		border-radius: 8px;
+		background-color: #f7fafc;
+		font-size: 0.8rem;
+		color: #4a5568;
+		line-height: 1.5;
+		text-align: justify;
+	}
+</style>
+
+</body>
+</html>
